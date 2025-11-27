@@ -28,7 +28,7 @@ class AdminPanelProvider extends PanelProvider
             ->id('admin')
             ->path('admin')
             ->login()
-            ->brandName('Godspeed You! Black Emperor - Broken Windows, Lock of Love Part III')
+            ->brandName('Techthink Admin')
             ->colors([
                 'primary' => Color::Red,
             ])
