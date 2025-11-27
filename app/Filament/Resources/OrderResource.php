@@ -74,14 +74,16 @@ class OrderResource extends Resource
                                             ->options(Product::query()->active()->pluck('name', 'id'))
                                             ->searchable()
                                             ->required()
-                                            ->reactive()
-                                            ->afterStateUpdated(function ($state, Forms\Set $set) {
+                                            ->live()
+                                            ->afterStateUpdated(function ($state, Forms\Set $set, Forms\Get $get) {
                                                 if ($state) {
                                                     $product = Product::find($state);
                                                     if ($product) {
                                                         $set('unit_price', $product->price);
                                                         $set('product_name', $product->name);
                                                         $set('product_sku', $product->sku);
+                                                        $quantity = $get('quantity') ?? 1;
+                                                        $set('subtotal', $product->price * $quantity);
                                                     }
                                                 }
                                             })
@@ -91,13 +93,21 @@ class OrderResource extends Resource
                                             ->default(1)
                                             ->minValue(1)
                                             ->required()
-                                            ->reactive()
+                                            ->live()
+                                            ->afterStateUpdated(function ($state, Forms\Set $set, Forms\Get $get) {
+                                                $unitPrice = $get('unit_price') ?? 0;
+                                                $set('subtotal', $unitPrice * ($state ?? 1));
+                                            })
                                             ->columnSpan(1),
                                         Forms\Components\TextInput::make('unit_price')
                                             ->numeric()
                                             ->prefix('Rp')
                                             ->required()
-                                            ->reactive()
+                                            ->live()
+                                            ->afterStateUpdated(function ($state, Forms\Set $set, Forms\Get $get) {
+                                                $quantity = $get('quantity') ?? 1;
+                                                $set('subtotal', ($state ?? 0) * $quantity);
+                                            })
                                             ->columnSpan(2),
                                         Forms\Components\Hidden::make('product_name'),
                                         Forms\Components\Hidden::make('product_sku'),
@@ -107,6 +117,13 @@ class OrderResource extends Resource
                                     ->defaultItems(1)
                                     ->addActionLabel('Add Product')
                                     ->reorderable(false)
+                                    ->live()
+                                    ->afterStateUpdated(function (Forms\Get $get, Forms\Set $set) {
+                                        self::updateTotals($get, $set);
+                                    })
+                                    ->deleteAction(
+                                        fn ($action) => $action->after(fn (Forms\Get $get, Forms\Set $set) => self::updateTotals($get, $set))
+                                    )
                                     ->columnSpanFull(),
                             ]),
 
@@ -170,7 +187,20 @@ class OrderResource extends Resource
                                     ])
                                     ->required()
                                     ->default('pending')
-                                    ->native(false),
+                                    ->native(false)
+                                    ->live()
+                                    ->afterStateUpdated(function ($state, Forms\Set $set, Forms\Get $get) {
+                                        $now = now();
+                                        if ($state === 'shipped' && !$get('shipped_at')) {
+                                            $set('shipped_at', $now);
+                                        }
+                                        if ($state === 'delivered' && !$get('delivered_at')) {
+                                            $set('delivered_at', $now);
+                                            if (!$get('shipped_at')) {
+                                                $set('shipped_at', $now);
+                                            }
+                                        }
+                                    }),
                                 Forms\Components\Select::make('payment_status')
                                     ->options([
                                         'pending' => 'Pending',
@@ -180,7 +210,13 @@ class OrderResource extends Resource
                                     ])
                                     ->required()
                                     ->default('pending')
-                                    ->native(false),
+                                    ->native(false)
+                                    ->live()
+                                    ->afterStateUpdated(function ($state, Forms\Set $set, Forms\Get $get) {
+                                        if ($state === 'paid' && !$get('paid_at')) {
+                                            $set('paid_at', now());
+                                        }
+                                    }),
                                 Forms\Components\Select::make('payment_method')
                                     ->options([
                                         'bank_transfer' => 'Bank Transfer',
@@ -197,37 +233,58 @@ class OrderResource extends Resource
                                     ->numeric()
                                     ->prefix('Rp')
                                     ->default(0)
-                                    ->required(),
+                                    ->disabled()
+                                    ->dehydrated()
+                                    ->helperText('Calculated from order items'),
                                 Forms\Components\TextInput::make('tax')
                                     ->numeric()
                                     ->prefix('Rp')
                                     ->default(0)
-                                    ->required(),
+                                    ->disabled()
+                                    ->dehydrated()
+                                    ->helperText('12% of subtotal'),
                                 Forms\Components\TextInput::make('shipping_cost')
                                     ->numeric()
                                     ->prefix('Rp')
                                     ->default(0)
-                                    ->required(),
+                                    ->live()
+                                    ->afterStateUpdated(function (Forms\Get $get, Forms\Set $set) {
+                                        self::updateTotals($get, $set);
+                                    }),
                                 Forms\Components\TextInput::make('discount')
                                     ->numeric()
                                     ->prefix('Rp')
                                     ->default(0)
-                                    ->required(),
+                                    ->live()
+                                    ->afterStateUpdated(function (Forms\Get $get, Forms\Set $set) {
+                                        self::updateTotals($get, $set);
+                                    }),
                                 Forms\Components\TextInput::make('total')
                                     ->numeric()
                                     ->prefix('Rp')
                                     ->default(0)
-                                    ->required(),
+                                    ->disabled()
+                                    ->dehydrated()
+                                    ->helperText('Subtotal + Tax + Shipping - Discount'),
                             ]),
 
                         Forms\Components\Section::make('Timestamps')
                             ->schema([
                                 Forms\Components\DateTimePicker::make('paid_at')
-                                    ->label('Paid At'),
+                                    ->label('Paid At')
+                                    ->disabled()
+                                    ->dehydrated()
+                                    ->helperText('Auto-filled when payment status is "Paid"'),
                                 Forms\Components\DateTimePicker::make('shipped_at')
-                                    ->label('Shipped At'),
+                                    ->label('Shipped At')
+                                    ->disabled()
+                                    ->dehydrated()
+                                    ->helperText('Auto-filled when status is "Shipped"'),
                                 Forms\Components\DateTimePicker::make('delivered_at')
-                                    ->label('Delivered At'),
+                                    ->label('Delivered At')
+                                    ->disabled()
+                                    ->dehydrated()
+                                    ->helperText('Auto-filled when status is "Delivered"'),
                             ])
                             ->collapsed(),
                     ])->columnSpan(['lg' => 1]),
@@ -388,5 +445,31 @@ class OrderResource extends Resource
     public static function getNavigationBadgeColor(): ?string
     {
         return 'warning';
+    }
+
+    public static function updateTotals(Forms\Get $get, Forms\Set $set): void
+    {
+        // Get all items from the repeater
+        $items = $get('items') ?? [];
+        
+        // Calculate subtotal from all items
+        $subtotal = collect($items)->sum(function ($item) {
+            return ($item['unit_price'] ?? 0) * ($item['quantity'] ?? 1);
+        });
+        
+        // Calculate tax at 12%
+        $tax = $subtotal * 0.12;
+        
+        // Get shipping and discount
+        $shippingCost = (float) ($get('shipping_cost') ?? 0);
+        $discount = (float) ($get('discount') ?? 0);
+        
+        // Calculate total
+        $total = $subtotal + $tax + $shippingCost - $discount;
+        
+        // Update the form fields
+        $set('subtotal', round($subtotal, 2));
+        $set('tax', round($tax, 2));
+        $set('total', round($total, 2));
     }
 }

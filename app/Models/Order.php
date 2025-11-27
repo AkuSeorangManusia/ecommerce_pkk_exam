@@ -56,6 +56,43 @@ class Order extends Model
             if (empty($order->order_number)) {
                 $order->order_number = 'ORD-' . strtoupper(uniqid());
             }
+            
+            // Calculate tax at 12% if not set
+            if ($order->subtotal > 0 && empty($order->tax)) {
+                $order->tax = $order->subtotal * 0.12;
+            }
+            
+            // Calculate total
+            $order->total = $order->subtotal + $order->tax + ($order->shipping_cost ?? 0) - ($order->discount ?? 0);
+        });
+
+        static::updating(function ($order) {
+            // Auto-set paid_at when payment_status changes to paid
+            if ($order->isDirty('payment_status') && $order->payment_status === 'paid' && empty($order->paid_at)) {
+                $order->paid_at = now();
+            }
+
+            // Auto-set shipped_at when status changes to shipped
+            if ($order->isDirty('status') && $order->status === 'shipped' && empty($order->shipped_at)) {
+                $order->shipped_at = now();
+            }
+
+            // Auto-set delivered_at when status changes to delivered
+            if ($order->isDirty('status') && $order->status === 'delivered' && empty($order->delivered_at)) {
+                $order->delivered_at = now();
+                // Also set shipped_at if not set
+                if (empty($order->shipped_at)) {
+                    $order->shipped_at = now();
+                }
+            }
+
+            // Recalculate tax at 12% if subtotal changed
+            if ($order->isDirty('subtotal')) {
+                $order->tax = $order->subtotal * 0.12;
+            }
+
+            // Recalculate total
+            $order->total = $order->subtotal + $order->tax + ($order->shipping_cost ?? 0) - ($order->discount ?? 0);
         });
     }
 
@@ -125,7 +162,14 @@ class Order extends Model
     public function calculateTotals(): void
     {
         $this->subtotal = $this->items()->sum('subtotal');
-        $this->total = $this->subtotal + $this->tax + $this->shipping_cost - $this->discount;
+        $this->tax = $this->subtotal * 0.12; // 12% tax
+        $this->total = $this->subtotal + $this->tax + ($this->shipping_cost ?? 0) - ($this->discount ?? 0);
+    }
+
+    public function recalculateFromItems(): void
+    {
+        $this->calculateTotals();
+        $this->save();
     }
 
     public function markAsPaid(): void
